@@ -1,0 +1,96 @@
+version: '3'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0  # The specific software version we are downloading
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"  # The standard port Zookeeper listens on.
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000  # How often it checks if Kafka is alive (in ms)
+
+  # --- KAFKA (Streaming Bus) ---
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper # Tells Docker: "Do not start Kafka until Zookeeper is running"
+    ports:
+      - "29092:29092" # External port (so your Producer script can connect)
+      - "9092:9092" # Internal port (for other containers to talk to Kafka)
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181' # Telling Kafka where the Manager is.
+      # These next lines are complex network settings to allow connections from both
+      # INSIDE the cluster (Spark) and OUTSIDE (your Python script).
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092 # Tells Kafka: "Please listen on these two ports inside the container"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092 # Tells Kafka: "Here is the address to give to clients who connect"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # We only have 1 Kafka, so we don't replicate data
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  # --- SPARK MASTER (Processing Brain) ---
+  spark-master:
+    image: bitnamilegacy/spark:3.3
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master # "I am the Boss"
+    ports:
+      - "8080:8080" # The Web Dashboard (We opened this port in Azure Networking)
+      - "7077:7077" # The internal line where workers connect
+
+  # --- SPARK WORKER (Processing Muscle) ---
+  spark-worker:
+    image: bitnamilegacy/spark:3.3
+    container_name: spark-worker 
+    environment:
+      - SPARK_MODE=worker # "I am an Employee"
+      - SPARK_MASTER_URL=spark://spark-master:7077 # "My Boss is at this address"
+      - SPARK_WORKER_MEMORY=1G # "I will use 1GB of RAM max" (Critical for our small VM)
+    depends_on:
+      - spark-master
+
+  # --- MINIO (Data Lake / S3) ---
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000" # API Port (For code to upload files)
+      - "9001:9001" # Console Port (Web UI for humans)
+    environment:
+      # The Login Credentials (like AWS Access Keys)
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001" # Command to start the server
+
+  # --- MONGODB (NoSQL DB) ---
+  mongodb: #It stores data. It has no screen, no buttons, just a listening port (27017). You can't "see" inside it without a tool.
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017" # Standard MongoDB port
+    environment:
+      # We set a password so it is secure
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+
+  # --- MONGO EXPRESS (DB UI) ---
+  mongo-express: 
+    image: mongo-express # A visual tool to see inside MongoDB (like phpMyAdmin)
+    container_name: mongo-express
+    ports:
+      - "8081:8081" # Web UI port
+    environment:
+      # Connecting the UI to the Database using the credentials above
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: password
+      ME_CONFIG_MONGODB_URL: mongodb://admin:password@mongodb:27017/
+    depends_on:
+      - mongodb
+
+networks:
+  default:
+    name: big-data-network
